@@ -1,7 +1,4 @@
-resolver: lts-8.17
-extra-deps:
-- haddock-api-2.17.3.1
-- aeson-1.1.1.0
-flags:
-  aeson:
-    cffi: false
+resolver:
+  name: lts-8.17-mod
+  location: snapshot.yaml
+
