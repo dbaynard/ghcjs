@@ -1,4 +1,3 @@
 resolver:
-  name: lts-8.17-mod
+  name: lts-9.1-mod
   location: snapshot.yaml
-
