@@ -25,6 +25,7 @@ import qualified GHC.PackageDb as GhcPkg
 import qualified Distribution.Simple.PackageIndex as PackageIndex
 import qualified Data.Graph as Graph
 import qualified Distribution.ModuleName as ModuleName
+import Distribution.Backpack
 import Distribution.ModuleName (ModuleName)
 import Distribution.InstalledPackageInfo as Cabal
 import Distribution.Compat.ReadP hiding (get)
@@ -37,6 +38,8 @@ import System.FilePath as FilePath
 import qualified System.FilePath.Posix as FilePath.Posix
 import System.Directory ( getAppUserDataDirectory, createDirectoryIfMissing,
                           getModificationTime )
+import qualified Data.Version as Version
+
 import Text.Printf
 
 import Prelude
@@ -530,7 +533,7 @@ readPackageArg AsDefault str = Id `fmap` readGlobPkgId str
 
 -- globVersion means "all versions"
 globVersion :: Version
-globVersion = Version [] ["*"]
+globVersion = nullVersion
 
 -- -----------------------------------------------------------------------------
 -- Package databases
@@ -1105,10 +1108,9 @@ convertPackageInfoToCacheFormat pkg =
        GhcPkg.unitId             = display (installedUnitId pkg),
        GhcPkg.sourcePackageId    = display (sourcePackageId pkg),
        GhcPkg.packageName        = display (packageName pkg),
-       GhcPkg.packageVersion     = packageVersion pkg,
+       GhcPkg.packageVersion     = convertVersion (packageVersion pkg),
        GhcPkg.depends            = map display (depends pkg),
-       GhcPkg.abiHash            = let AbiHash abi = abiHash pkg
-                                   in abi,
+       GhcPkg.abiHash            = unAbiHash (abiHash pkg),
        GhcPkg.importDirs         = importDirs pkg,
        GhcPkg.hsLibraries        = hsLibraries pkg,
        GhcPkg.extraLibraries     = extraLibraries pkg,
@@ -1130,10 +1132,15 @@ convertPackageInfoToCacheFormat pkg =
        GhcPkg.exposed            = exposed pkg,
        GhcPkg.trusted            = trusted pkg
     }
-  where convertExposed (ExposedModule n reexport) =
+  where convertExposed :: ExposedModule -> GhcPkg.ExposedModule String ModuleName
+        convertExposed (ExposedModule n reexport) =
             GhcPkg.ExposedModule n (fmap convertOriginal reexport)
-        convertOriginal (OriginalModule ipid m) =
+        convertOriginal :: OpenModule -> GhcPkg.OriginalModule String ModuleName
+        convertOriginal (OpenModule ipid m) =
             GhcPkg.OriginalModule (display ipid) m
+        convertVersion :: Version -> Version.Version
+        convertVersion = let mkV ns = Version.Version ns [] in
+            mkV . versionNumbers
 
 instance GhcPkg.BinaryStringRep ModuleName where
   fromStringRep = ModuleName.fromString . fromUTF8 . BS.unpack
@@ -1418,7 +1425,7 @@ pid `matches` pid'
     && (pkgVersion pid == pkgVersion pid' || not (realVersion pid))
 
 realVersion :: PackageIdentifier -> Bool
-realVersion pkgid = versionBranch (pkgVersion pkgid) /= []
+realVersion pkgid = isAnyVersion (thisVersion (pkgVersion pkgid))
   -- when versionBranch == [], this is a glob
 
 matchesPkg :: PackageArg -> InstalledPackageInfo -> Bool
@@ -1753,7 +1760,10 @@ checkExposedModules db_stack pkg =
   mapM_ checkExposedModule (exposedModules pkg)
   where
     checkExposedModule (ExposedModule modl reexport) = do
-      let checkOriginal = checkModuleFile pkg modl
+      let checkOriginal :: Validate ()
+          checkOriginal = checkModuleFile pkg modl
+          -- checkReexport :: GhcPkg.OriginalModule UnitId ModuleName -> Validate ()
+          checkReexport :: OpenModule -> Validate ()
           checkReexport = checkOriginalModule "module reexport" db_stack pkg
       maybe checkOriginal checkReexport reexport
 
@@ -1795,13 +1805,13 @@ checkDuplicateModules pkg
 checkOriginalModule :: String
                     -> PackageDBStack
                     -> InstalledPackageInfo
-                    -> OriginalModule
+                    -> OpenModule
                     -> Validate ()
 checkOriginalModule field_name db_stack pkg
-    (OriginalModule definingPkgId definingModule) =
-  let mpkg = if definingPkgId == installedUnitId pkg
+    (OpenModule definingPkgId definingModule) =
+  let mpkg = if abstractUnitId definingPkgId == installedUnitId pkg
               then Just pkg
-              else PackageIndex.lookupUnitId ipix definingPkgId
+              else PackageIndex.lookupUnitId ipix (abstractUnitId definingPkgId)
   in case mpkg of
       Nothing
            -> verror ForceAll (field_name ++ " refers to a non-existent " ++
@@ -1809,7 +1819,7 @@ checkOriginalModule field_name db_stack pkg
                                        display definingPkgId)
 
       Just definingPkg
-        | not (isIndirectDependency definingPkgId)
+        | not (isIndirectDependency (abstractUnitId definingPkgId))
            -> verror ForceAll (field_name ++ " refers to a defining " ++
                                "package that is not a direct (or indirect) " ++
                                "dependency of this package: " ++
